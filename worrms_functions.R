@@ -3,8 +3,45 @@
 # 14.03.25
 # Dina's script for pulling functional information for taxa from WORMS
 
-library(taxize)
-library(worrms)
+list.of.packages <- c("dplyr", 
+                      "tidyverse", 
+                      "phyloseq", 
+                      "seqinr", 
+                      "dada2", 
+                      "sjmisc", 
+                      "worrms",
+                      "taxize",
+                      "tibble", 
+                      "taxadb",
+                      "reshape2",
+                      "decontam",
+                      "microViz",
+                      "cowplot",
+                      "devtools",
+                      "qiime2R", 
+                      "microbiome",
+                      "vegan",
+                      "ggforce",
+                      "ANCOMBC")
+                      
+
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) install.packages(new.packages)
+
+invisible(lapply(list.of.packages, library, character.only = TRUE))
+
+#Step 0 lets make a mock list of species
+
+mock_sp_data <- data.frame(
+   sp_name  = c("Aeolidia papillosa", "Galathea squamifera", "Hippolyte varians", 
+                "Platynereis dumerilii", "Nicolea zostericola", "Ascidiella aspersa", 
+                "Ophiothrix", "Enoplidae", "Heteronemertea", "Polycladida"))
+
+library(writexl)
+library(readxl)
+
+ref_lib_taxa <- read_xlsx("trad_vs_eDNA_both_markers_table.xlsx", sheet = 3)
+ref_lib_taxa <- ref_lib_taxa %>% rename(sp_name = lca_taxa_name_num_rm)
 
 #Step 1: The first function called get_wormsid_noerror extracts unique identifiers for all taxon used in WoRMS called AphiaIDs.(15-mins)
 
@@ -40,8 +77,9 @@ get_wormsid_noerror <- function(sp_name){
   tibble(sciname = sp_name, aphiaID = as.double(unlist(wm_id)))
 }
 
+# Input is sp_name
 # call the function
-aphiaID_worms_output <- YOUR_TAXA_LIST %>%
+aphiaID_worms_output <- ref_lib_taxa$sp_name %>%
   purrr::map(get_wormsid_noerror, .progress = TRUE) %>%
   enframe() %>%
   unnest(cols = everything()) %>%
@@ -63,8 +101,10 @@ get_wormsmeta <- function(aphia_input){
   tibble(temp_df)
 }
 
-# Call the function
+# Input is 
+# Call the function aphiaID_worms_output
 worms_meta_output <- get_wormsmeta(aphiaID_worms_output)
+
 
 #Step 3: The third function called get_worms_fgrp (originally developed here) accesses and formats information on broad taxonomic groupings of taxa based on Aphia IDs. (around 30 mins)
 
@@ -215,7 +255,110 @@ get_worms_fgrp <- function(AphiaID) {
   out
 }
 
+# Input is worms_meta_output
 # call function
-worms_fgrp_output <- YOUR_UNIQUE_APHIAID_LIST %>%
+worms_fgrp_output <- worms_meta_output %>%
   group_by(AphiaID) %>%
   do(get_worms_fgrp(AphiaID = .$AphiaID))
+
+worms_fgrp_output
+
+worms_fgrp_taxa <- full_join(worms_meta_output %>%
+                               select(AphiaID, valid_name), 
+                             worms_fgrp_output, by = "AphiaID")
+
+worms_fgrp_taxa
+
+
+################################################################################
+
+get_worms_attr <- function(AphiaID) {
+  
+  #' Test if the species has attribute data
+  attr_dat <- try(wm_attr_data(AphiaID, include_inherited = TRUE), silent = TRUE)
+  
+  #' Set up default tibble output
+  out <- tibble(AphiaID = AphiaID, fun_grp = NA_character_, body_size = NA_character_, 
+                feeding_type = NA_character_, ambi_group = NA_character_, stage = NA_character_)  
+  
+  if (!inherits(attr_dat, "try-error") && !is.null(attr_dat)) {
+    
+    #' Extract relevant attributes
+    fg_dat <- attr_dat %>% filter(measurementType == "Functional group")
+    size_dat <- attr_dat %>% filter(measurementType == "Body size (qualitative)")
+    feeding_dat <- attr_dat %>% filter(measurementType == "Feedingtype")
+    dev_dat <- attr_dat %>% filter(measurementType == "Development")
+    ambi_dat <- attr_dat %>% filter(measurementType == "AMBI ecological group")
+    
+    #' Assign attributes if present
+    fun_grp <- ifelse(nrow(fg_dat) > 0, fg_dat$measurementValue, NA_character_)
+    body_size <- ifelse(nrow(size_dat) > 0, size_dat$measurementValue, NA_character_)
+    feeding_type <- ifelse(nrow(feeding_dat) > 0, feeding_dat$measurementValue, NA_character_)
+    dev_group <- ifelse(nrow(dev_dat) > 0, dev_dat$measurementValue, NA_character_)
+    ambi_group <- ifelse(nrow(ambi_dat) > 0, ambi_dat$measurementValue, NA_character_)
+    
+    #' Extract stage information from the children column in Functional group data
+    if (nrow(fg_dat) > 0 && !is.null(fg_dat$children)) {
+      children <- fg_dat$children
+      if(max(lengths(children)) > 0) {
+        stage <- children %>% bind_rows() %>%
+          dplyr::select(measurementValue) %>%
+          dplyr::rename(stage = measurementValue)
+        
+        # Handling missing stages and creating unique stage labels if there are multiple stages
+        stage <- stage %>% group_by(stage) %>% mutate(nth_stage_val = 1:n()) %>%
+          ungroup() %>%
+          mutate(stage = case_when(
+            nth_stage_val == 1 ~ stage,
+            TRUE ~ paste(stage, nth_stage_val, sep = "_")
+          )) %>%
+          select(-nth_stage_val)
+      } else {
+        stage <- tibble(stage = NA_character_)
+      }
+    } else {
+      stage <- tibble(stage = NA_character_)
+    }
+    
+    # Add the stage information to the output tibble
+    out <- tibble(AphiaID = as.numeric(AphiaID), 
+                  fun_grp = fun_grp, 
+                  body_size = body_size, 
+                  feeding_type = feeding_type, 
+                  dev_group = dev_group, 
+                  ambi_group = ambi_group,
+                  stage = ifelse(nrow(stage) > 0, stage$stage, NA_character_))
+  }
+  
+  #' Taxonomic fallback classification if no attributes were found
+  if (all(is.na(out[-1]))) {  # Check if all columns except AphiaID are NA
+    taxo_dat <- try(wm_classification(AphiaID), silent = TRUE)
+    
+    if (!inherits(taxo_dat, "try-error") && !is.null(taxo_dat)) {
+      taxo_group <- case_when(
+        "Aves" %in% taxo_dat$scientificname ~ "birds",
+        "Mammalia" %in% taxo_dat$scientificname ~ "mammals",
+        "Reptilia" %in% taxo_dat$scientificname ~ "reptiles",
+        TRUE ~ NA_character_
+      )
+      out <- tibble(AphiaID = AphiaID, fun_grp = taxo_group, body_size = NA, feeding_type = NA, dev_group = NA, ambi_group = NA, stage = NA)
+    }
+  }
+  
+  #' Clean missing values and return distinct results
+  out <- out %>%
+    distinct(AphiaID, .keep_all = TRUE) %>%
+    mutate(across(everything(), ~ ifelse(. == 'not applicable', NA, .)))
+  
+  return(out)
+}
+
+# Input is worms_meta_output
+# call function
+worms_attr_output <- worms_meta_output %>%
+  group_by(AphiaID) %>%
+  do(get_worms_attr(AphiaID = .$AphiaID))
+
+worms_attr_taxa <- full_join(worms_meta_output %>%
+                               select(AphiaID, valid_name), 
+                             worms_attr_output, by = "AphiaID")
